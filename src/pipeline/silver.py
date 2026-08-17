@@ -14,6 +14,8 @@ Public API (harness)::
 
 from __future__ import annotations
 
+import math
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Mapping, Optional, Sequence, Union
 
@@ -26,6 +28,34 @@ from pipeline.quarantine import insert_quarantine
 logger = get_logger("pipeline.silver")
 
 PathLike = Union[str, Path]
+
+KNOWN_STATUSES = {"PENDING", "COMPLETED", "FAILED", "CANCELLED"}
+
+
+def _parse_amount(amount: Any) -> Optional[float]:
+    """Parse a bronze amount (string/number/None) into a finite float, else None."""
+    if amount is None:
+        return None
+    text = str(amount).strip()
+    if not text:
+        return None
+    try:
+        value = float(text)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(value):
+        return None
+    return value
+
+
+def _gpv_day(event_time: Optional[str]) -> Optional[date]:
+    """UTC calendar date of an ISO-8601 event_time string, else None."""
+    if not event_time:
+        return None
+    try:
+        return datetime.fromisoformat(event_time.replace("Z", "+00:00")).date()
+    except ValueError:
+        return None
 
 BRONZE_SELECT = """
     SELECT event_id, transaction_id, status, product_type, currency,
@@ -77,9 +107,13 @@ def classify_quarantine(row: Mapping[str, Any]) -> Optional[str]:
 
     Return None when the event may compete for transactions_current.
     """
-    raise NotImplementedError(
-        "CANDIDATE: implement classify_quarantine for NULL_PK | BAD_AMOUNT | UNKNOWN_STATUS"
-    )
+    if not row.get("transaction_id") or not row.get("event_id"):
+        return "NULL_PK"
+    if _parse_amount(row.get("amount")) is None:
+        return "BAD_AMOUNT"
+    if row.get("status") not in KNOWN_STATUSES:
+        return "UNKNOWN_STATUS"
+    return None
 
 
 def pick_winner(events_for_tx: Sequence[Mapping[str, Any]]) -> Mapping[str, Any]:
@@ -97,10 +131,28 @@ def pick_winner(events_for_tx: Sequence[Mapping[str, Any]]) -> Mapping[str, Any]
       - gpv_day = UTC date of winning COMPLETED event_time (else null)
     build_silver inserts those keys; bronze only has amount / event_time.
     """
-    raise NotImplementedError(
-        "CANDIDATE: implement pick_winner with order key (event_time, sequence, event_id); "
-        "null event_time never wins; set amount_magnitude and gpv_day on the winner"
+    if not events_for_tx:
+        raise ValueError("pick_winner requires at least one event")
+
+    def _sort_key(rec: Mapping[str, Any]) -> tuple[int, str, int, int, str]:
+        event_time = rec.get("event_time")
+        sequence = rec.get("sequence")
+        return (
+            1 if event_time else 0,
+            event_time or "",
+            1 if sequence is not None else 0,
+            sequence or 0,
+            rec.get("event_id") or "",
+        )
+
+    winner = dict(max(events_for_tx, key=_sort_key))
+
+    magnitude = _parse_amount(winner.get("amount"))
+    winner["amount_magnitude"] = abs(magnitude) if magnitude is not None else None
+    winner["gpv_day"] = (
+        _gpv_day(winner.get("event_time")) if winner.get("status") == "COMPLETED" else None
     )
+    return winner
 
 
 def _fetch_bronze_records(conn: duckdb.DuckDBPyConnection) -> list[dict[str, Any]]:

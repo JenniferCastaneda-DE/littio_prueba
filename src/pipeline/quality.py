@@ -29,10 +29,18 @@ def check_unique_transaction_id(conn: duckdb.DuckDBPyConnection) -> None:
 
     CANDIDATE: raise AssertionError/ValueError if duplicates exist.
     """
-    raise NotImplementedError(
-        "CANDIDATE: implement check_unique_transaction_id — "
-        "fail if silver.transactions_current has duplicate transaction_id"
-    )
+    dupes = conn.execute(
+        """
+        SELECT transaction_id, COUNT(*) AS n
+        FROM silver.transactions_current
+        GROUP BY transaction_id
+        HAVING COUNT(*) > 1
+        """
+    ).fetchall()
+    if dupes:
+        raise AssertionError(
+            f"duplicate transaction_id in silver.transactions_current: {dupes}"
+        )
 
 
 def check_completed_magnitude(conn: duckdb.DuckDBPyConnection) -> None:
@@ -40,10 +48,18 @@ def check_completed_magnitude(conn: duckdb.DuckDBPyConnection) -> None:
 
     CANDIDATE: raise AssertionError/ValueError on violation (GPV money integrity).
     """
-    raise NotImplementedError(
-        "CANDIDATE: implement check_completed_magnitude — "
-        "COMPLETED rows must have amount_magnitude >= 0 and NOT NULL"
-    )
+    bad = conn.execute(
+        """
+        SELECT transaction_id, amount_magnitude
+        FROM silver.transactions_current
+        WHERE status = 'COMPLETED'
+          AND (amount_magnitude IS NULL OR amount_magnitude < 0)
+        """
+    ).fetchall()
+    if bad:
+        raise AssertionError(
+            f"COMPLETED rows with NULL/negative amount_magnitude: {bad}"
+        )
 
 
 def check_gpv_reconciles_to_silver(conn: duckdb.DuckDBPyConnection) -> None:
@@ -52,10 +68,35 @@ def check_gpv_reconciles_to_silver(conn: duckdb.DuckDBPyConnection) -> None:
     CANDIDATE: compare stage.gold_daily_metrics to silver.transactions_current
     COMPLETED winners (gpv_day / product_type / currency). Raise on mismatch.
     """
-    raise NotImplementedError(
-        "CANDIDATE: implement check_gpv_reconciles_to_silver — "
-        "stage gold GPV must match silver COMPLETED set per day"
-    )
+    stage_rows = conn.execute(
+        "SELECT gpv_day, product_type, currency, gpv_amount FROM stage.gold_daily_metrics"
+    ).fetchall()
+    silver_rows = conn.execute(
+        """
+        SELECT gpv_day, product_type, currency, SUM(amount_magnitude)
+        FROM silver.transactions_current
+        WHERE status = 'COMPLETED'
+          AND gpv_day IS NOT NULL
+        GROUP BY 1, 2, 3
+        """
+    ).fetchall()
+
+    stage_map = {(r[0], r[1], r[2]): r[3] for r in stage_rows}
+    silver_map = {(r[0], r[1], r[2]): r[3] for r in silver_rows}
+
+    if set(stage_map) != set(silver_map):
+        raise AssertionError(
+            "gold/silver GPV key mismatch: "
+            f"stage_only={set(stage_map) - set(silver_map)}, "
+            f"silver_only={set(silver_map) - set(stage_map)}"
+        )
+    mismatches = {
+        k: (stage_map[k], silver_map[k])
+        for k in stage_map
+        if abs((stage_map[k] or 0) - (silver_map[k] or 0)) > 1e-6
+    }
+    if mismatches:
+        raise AssertionError(f"gold/silver GPV amount mismatch: {mismatches}")
 
 
 def gold_is_published(
