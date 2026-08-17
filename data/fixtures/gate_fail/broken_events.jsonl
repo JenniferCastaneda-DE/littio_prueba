@@ -1,0 +1,4 @@
+{"event_id":"evt_gate_broken_null_pk","transaction_id":null,"status":"COMPLETED","product_type":"TOPUP","currency":"COP","amount":"100.00","event_time":"2024-06-01T10:00:00Z","sequence":1,"source_file_hint":"broken_events.jsonl"}
+{"event_id":"evt_gate_broken_bad_amount","transaction_id":"tx_gate_broken_amount","status":"COMPLETED","product_type":"TOPUP","currency":"COP","amount":"","event_time":"2024-06-01T10:01:00Z","sequence":1,"source_file_hint":"broken_events.jsonl"}
+{"event_id":"evt_gate_dup_path_a","transaction_id":"tx_gate_event_dup","status":"COMPLETED","product_type":"TRANSFER","currency":"USD","amount":"25.00","event_time":"2024-06-01T10:02:00Z","sequence":1,"source_file_hint":"broken_events.jsonl"}
+{"event_id":"evt_gate_dup_path_b","transaction_id":"tx_gate_event_dup","status":"COMPLETED","product_type":"TRANSFER","currency":"USD","amount":"25.00","event_time":"2024-06-01T10:02:00Z","sequence":1,"source_file_hint":"broken_events.jsonl"}

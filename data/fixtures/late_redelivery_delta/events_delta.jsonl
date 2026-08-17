@@ -1,0 +1,2 @@
+{"event_id":"evt_completed_tx_topup_cop_1","transaction_id":"tx_topup_cop_1","status":"COMPLETED","product_type":"TOPUP","currency":"COP","amount":"200.00","event_time":"2024-06-01T09:30:00Z","sequence":1,"source_file_hint":"events_delta.jsonl"}
+{"event_id":"evt_delta_completed_tx_pending_only_B","transaction_id":"tx_pending_only_B","status":"COMPLETED","product_type":"TOPUP","currency":"USD","amount":"60.00","event_time":"2024-06-01T19:00:00Z","sequence":2,"source_file_hint":"events_delta.jsonl"}

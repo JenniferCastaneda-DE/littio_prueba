@@ -1,0 +1,59 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://littio.local/schemas/event.v1.json",
+  "title": "TransactionLifecycleEvent",
+  "description": "One JSONL line: lifecycle status event for a Littio transaction.",
+  "type": "object",
+  "additionalProperties": true,
+  "required": [
+    "event_id",
+    "transaction_id",
+    "status",
+    "product_type",
+    "currency",
+    "amount",
+    "event_time",
+    "sequence"
+  ],
+  "properties": {
+    "event_id": {
+      "description": "Event identifier (uuid-like string). Null/missing → quarantine NULL_PK.",
+      "type": ["string", "null"]
+    },
+    "transaction_id": {
+      "description": "Transaction grain key. Null/missing → quarantine NULL_PK.",
+      "type": ["string", "null"]
+    },
+    "status": {
+      "description": "Lifecycle status. Known set: PENDING|COMPLETED|FAILED|CANCELLED. Typos (e.g. FAILD) and other values → UNKNOWN_STATUS.",
+      "type": ["string", "null"]
+    },
+    "product_type": {
+      "description": "Product family.",
+      "type": ["string", "null"],
+      "enum": ["TOPUP", "TRANSFER", "WITHDRAWAL", null]
+    },
+    "currency": {
+      "description": "ISO-like currency code; no FX blending.",
+      "type": ["string", "null"],
+      "enum": ["COP", "USD", null]
+    },
+    "amount": {
+      "description": "Magnitude (string or number). May be unparseable → BAD_AMOUNT. GPV uses abs(parse) when COMPLETED wins.",
+      "type": ["string", "number", "null"]
+    },
+    "event_time": {
+      "description": "ISO-8601 UTC timestamp, or null. Null never wins ordering.",
+      "type": ["string", "null"],
+      "format": "date-time"
+    },
+    "sequence": {
+      "description": "Tie-break within same event_time (ascending).",
+      "type": ["integer", "null"]
+    },
+    "source_file_hint": {
+      "description": "Optional source file hint from export.",
+      "type": ["string", "null"]
+    }
+  }
+}
