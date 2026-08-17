@@ -66,7 +66,13 @@ BRONZE_SELECT = """
 
 
 def ensure_silver_tables(conn: duckdb.DuckDBPyConnection) -> None:
-    """Create silver.transactions_current and silver.quarantine if missing."""
+    """Create silver.transactions_current, silver.quarantine, and the
+    silver.processed_events watermark table if missing.
+
+    processed_events tracks (event_id -> _row_hash) already folded into
+    transactions_current / quarantine, so build_silver can skip bronze rows
+    it has already merged (see build_silver for the incremental strategy).
+    """
     init_schemas(conn)
     conn.execute(
         """
@@ -92,6 +98,15 @@ def ensure_silver_tables(conn: duckdb.DuckDBPyConnection) -> None:
             detail          VARCHAR,
             raw_json        VARCHAR,
             quarantined_at  TIMESTAMP
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS silver.processed_events (
+            event_id        VARCHAR PRIMARY KEY,
+            row_hash        VARCHAR NOT NULL,
+            transaction_id  VARCHAR
         )
         """
     )
@@ -161,23 +176,73 @@ def _fetch_bronze_records(conn: duckdb.DuckDBPyConnection) -> list[dict[str, Any
     return [dict(zip(cols, row)) for row in result.fetchall()]
 
 
+def _fetch_processed_hashes(conn: duckdb.DuckDBPyConnection) -> dict[str, str]:
+    rows = conn.execute("SELECT event_id, row_hash FROM silver.processed_events").fetchall()
+    return {event_id: row_hash for event_id, row_hash in rows}
+
+
+def _fetch_current_rows(
+    conn: duckdb.DuckDBPyConnection, transaction_ids: Sequence[str]
+) -> dict[str, dict[str, Any]]:
+    """Existing transactions_current rows for the given ids, as pick_winner-shaped dicts.
+
+    amount_magnitude (already non-negative) is fed back in as "amount" so the
+    stored winner can re-compete fairly against new bronze rows without
+    needing to keep the raw amount string around.
+    """
+    if not transaction_ids:
+        return {}
+    placeholders = ",".join("?" for _ in transaction_ids)
+    rows = conn.execute(
+        f"""
+        SELECT transaction_id, event_id, status, product_type, currency,
+               amount_magnitude, event_time, sequence, gpv_day
+        FROM silver.transactions_current
+        WHERE transaction_id IN ({placeholders})
+        """,
+        list(transaction_ids),
+    ).fetchall()
+    out: dict[str, dict[str, Any]] = {}
+    for tid, event_id, status, product_type, currency, magnitude, event_time, sequence, gpv_day in rows:
+        out[tid] = {
+            "transaction_id": tid,
+            "event_id": event_id,
+            "status": status,
+            "product_type": product_type,
+            "currency": currency,
+            "amount": magnitude,
+            "event_time": event_time,
+            "sequence": sequence,
+            "gpv_day": gpv_day,
+        }
+    return out
+
+
 def build_silver(
     conn: Optional[duckdb.DuckDBPyConnection] = None,
     db_path: Optional[PathLike] = None,
     **_kwargs: Any,
 ) -> dict[str, Any]:
-    """Build silver.transactions_current from bronze.events.
+    """Merge bronze.events into silver.transactions_current incrementally.
 
     Accepts either an open ``conn`` or ``db_path`` (harness/Makefile style).
 
-    Orchestration (kit skeleton):
+    Orchestration:
       1. ensure_silver_tables
-      2. read bronze.events
-      3. classify_quarantine → kit insert_quarantine for bad rows
-      4. group remaining by transaction_id → pick_winner → upsert current
+      2. read bronze.events, diff against silver.processed_events by
+         (event_id, _row_hash) — unseen or content-changed rows are the
+         "delta"; already-merged/byte-identical redeliveries are skipped
+      3. classify_quarantine on the delta → kit insert_quarantine for bad rows
+      4. group delta's good rows by transaction_id, re-competing each affected
+         transaction_id against its *existing* transactions_current row (if
+         any) → pick_winner over the union → upsert (MERGE), not
+         truncate-and-reload
+      5. record the delta's (event_id, row_hash) as processed
 
     Candidate implements classify_quarantine and pick_winner (and any
-    magnitude / gpv_day derivation they choose before insert).
+    magnitude / gpv_day derivation they choose before insert). See
+    docs/ARCHITECTURE.md decision table for why this is a merge and not a
+    full rebuild.
     """
     own = conn is None
     if own:
@@ -187,22 +252,30 @@ def build_silver(
     try:
         ensure_silver_tables(conn)
 
-        # Clear prior silver build for deterministic rebuild from bronze
-        conn.execute("DELETE FROM silver.transactions_current")
-        conn.execute("DELETE FROM silver.quarantine")
-
         records = _fetch_bronze_records(conn)
         if not records:
+            return {"bronze_rows": 0, "delta_rows": 0, "quarantined": 0, "current_rows": 0}
+
+        processed = _fetch_processed_hashes(conn)
+        delta = [
+            rec for rec in records if processed.get(rec.get("event_id")) != rec.get("_row_hash")
+        ]
+
+        current_rows = int(
+            conn.execute("SELECT COUNT(*) FROM silver.transactions_current").fetchone()[0]
+        )
+        if not delta:
             return {
-                "bronze_rows": 0,
+                "bronze_rows": len(records),
+                "delta_rows": 0,
                 "quarantined": 0,
-                "current_rows": 0,
+                "current_rows": current_rows,
             }
 
         good: list[dict[str, Any]] = []
         quarantine_batch: list[dict[str, Any]] = []
 
-        for rec in records:
+        for rec in delta:
             reason = classify_quarantine(rec)  # CANDIDATE
             if reason is not None:
                 quarantine_batch.append(
@@ -224,7 +297,10 @@ def build_silver(
             tid = rec.get("transaction_id")
             by_tx.setdefault(tid, []).append(rec)
 
-        current_rows = 0
+        existing_by_tx = _fetch_current_rows(conn, list(by_tx.keys()))
+        for tid, existing in existing_by_tx.items():
+            by_tx[tid].append(existing)
+
         for _tid, events in by_tx.items():
             winner = pick_winner(events)  # CANDIDATE
             conn.execute(
@@ -232,7 +308,17 @@ def build_silver(
                 INSERT INTO silver.transactions_current (
                     transaction_id, event_id, status, product_type, currency,
                     amount_magnitude, event_time, sequence, gpv_day, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, now())
+                ON CONFLICT (transaction_id) DO UPDATE SET
+                    event_id = EXCLUDED.event_id,
+                    status = EXCLUDED.status,
+                    product_type = EXCLUDED.product_type,
+                    currency = EXCLUDED.currency,
+                    amount_magnitude = EXCLUDED.amount_magnitude,
+                    event_time = EXCLUDED.event_time,
+                    sequence = EXCLUDED.sequence,
+                    gpv_day = EXCLUDED.gpv_day,
+                    updated_at = now()
                 """,
                 [
                     winner.get("transaction_id"),
@@ -246,10 +332,25 @@ def build_silver(
                     winner.get("gpv_day"),
                 ],
             )
-            current_rows += 1
+
+        conn.executemany(
+            """
+            INSERT INTO silver.processed_events (event_id, row_hash, transaction_id)
+            VALUES (?, ?, ?)
+            ON CONFLICT (event_id) DO UPDATE SET
+                row_hash = EXCLUDED.row_hash,
+                transaction_id = EXCLUDED.transaction_id
+            """,
+            [[rec.get("event_id"), rec.get("_row_hash"), rec.get("transaction_id")] for rec in delta],
+        )
+
+        current_rows = int(
+            conn.execute("SELECT COUNT(*) FROM silver.transactions_current").fetchone()[0]
+        )
 
         return {
             "bronze_rows": len(records),
+            "delta_rows": len(delta),
             "quarantined": len(quarantine_batch),
             "current_rows": current_rows,
         }
