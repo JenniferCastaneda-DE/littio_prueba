@@ -13,20 +13,12 @@
 -- Skeleton returns zero rows until TODOs are filled (WHERE 1 = 0).
 
 SELECT
-    CAST(NULL AS DATE)        AS gpv_day,
-    CAST(NULL AS VARCHAR)     AS product_type,
-    CAST(NULL AS VARCHAR)     AS currency,
-    CAST(NULL AS DOUBLE)      AS gpv_amount
+    gpv_day,
+    product_type,
+    currency,
+    SUM(amount_magnitude) AS gpv_amount
 FROM silver.transactions_current
-WHERE 1 = 0
--- CANDIDATE: replace the above SELECT with real aggregation, e.g.:
--- SELECT
---     gpv_day,
---     product_type,
---     currency,
---     SUM(amount_magnitude) AS gpv_amount
--- FROM silver.transactions_current
--- WHERE status = 'COMPLETED'
---   AND gpv_day IS NOT NULL
--- GROUP BY 1, 2, 3
+WHERE status = 'COMPLETED'
+  AND gpv_day IS NOT NULL
+GROUP BY 1, 2, 3
 ;
